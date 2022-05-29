@@ -26,12 +26,20 @@ const double PI = 3.141592653589793;
 float cameraScale = 2;
 // 카메라 회전 속도
 float cameraMoveSpeed = 0.1f;
+// 직선 회전 속도
+float lineMoveSpeed = 0.005f;
 // 카메라 회전 각도
 float cameraRadians = 0;
 // 카메라가 움지이는 반경 (원의 반지름)
 float cameraRadius = 5;
-// 직선 회전 속도
-float lineMoveSpeed = 0.005f;
+// 카메라 위치
+float cameraPos[] = { 5, 5, 5 };
+// 카메라 방향
+float cameraVector[] = { 0, 0, 0 };
+// 카메라에서 총알 방향으로 평면간의 거리
+float cameraDistance = 0;
+// 총알에서 평면간의 거리
+float bulletDistance = 0;
 
 // 직선이 시작되는 지점 (총알이 발사되는 좌표)
 GLfloat bulletPos[] = { 0, 0, 2 };
@@ -45,12 +53,13 @@ GLfloat triangleVertex[3][3] = {
 };
 
 // 직선과 평면의 교점
-GLfloat bulletMiddlePoint[3];
-// 직선의 끝점 좌표
 GLfloat bulletEndPoint[3];
 
 // 충돌 여부를 저장
 bool isCollision = false;
+
+// 직선 회전 모드 변경
+int lineMoveMode = 0;
 
 // 좌표 데이터를 입력받는 함수
 void InputData() {
@@ -110,26 +119,26 @@ void VectorCrossProduct(GLfloat *A, GLfloat *B, GLfloat *result) {
 }
 
 // 총알이 발사된 정점과 평면간의 거리를 반환하는 함수
-float DistancePointAndPlane() {
-  float A = triangleVertex[0][1] * (triangleVertex[1][2] - triangleVertex[2][2]);
-  A += triangleVertex[1][1] * (triangleVertex[2][2] - triangleVertex[0][2]);
-  A += triangleVertex[2][1] * (triangleVertex[0][2] - triangleVertex[1][2]);
+float DistancePointAndPlane(GLfloat plane[3][3], GLfloat *point, GLfloat *vector) {
+  float A = plane[0][1] * (plane[1][2] - plane[2][2]);
+  A += plane[1][1] * (plane[2][2] - plane[0][2]);
+  A += plane[2][1] * (plane[0][2] - plane[1][2]);
 
-  float B = triangleVertex[0][2] * (triangleVertex[1][0] - triangleVertex[2][0]);
-  B += triangleVertex[1][2] * (triangleVertex[2][0] - triangleVertex[0][0]);
-  B += triangleVertex[2][2] * (triangleVertex[0][0] - triangleVertex[1][0]);
+  float B = plane[0][2] * (plane[1][0] - plane[2][0]);
+  B += plane[1][2] * (plane[2][0] - plane[0][0]);
+  B += plane[2][2] * (plane[0][0] - plane[1][0]);
 
-  float C = triangleVertex[0][0] * (triangleVertex[1][1] - triangleVertex[2][1]);
-  C += triangleVertex[1][0] * (triangleVertex[2][1] - triangleVertex[0][1]);
-  C += triangleVertex[2][0] * (triangleVertex[0][1] - triangleVertex[1][1]);
+  float C = plane[0][0] * (plane[1][1] - plane[2][1]);
+  C += plane[1][0] * (plane[2][1] - plane[0][1]);
+  C += plane[2][0] * (plane[0][1] - plane[1][1]);
 
-  float D = triangleVertex[0][0] * ((triangleVertex[1][1] * triangleVertex[2][2]) - (triangleVertex[2][1] * triangleVertex[1][2]));
-  D += triangleVertex[1][0] * ((triangleVertex[2][1] * triangleVertex[0][2]) - (triangleVertex[0][1] * triangleVertex[2][2]));
-  D += triangleVertex[2][0] * ((triangleVertex[0][1] * triangleVertex[1][2]) - (triangleVertex[1][1] * triangleVertex[0][2]));
+  float D = plane[0][0] * ((plane[1][1] * plane[2][2]) - (plane[2][1] * plane[1][2]));
+  D += plane[1][0] * ((plane[2][1] * plane[0][2]) - (plane[0][1] * plane[2][2]));
+  D += plane[2][0] * ((plane[0][1] * plane[1][2]) - (plane[1][1] * plane[0][2]));
   D *= -1;
 
-  float t = (A * bulletPos[0]) + (B * bulletPos[1]) + (C * bulletPos[2]) + D;
-  t /= (A * bulletVector[0]) + (B * bulletVector[1]) + (C * bulletVector[2]);
+  float t = (A * point[0]) + (B * point[1]) + (C * point[2]) + D;
+  t /= (A * vector[0]) + (B * vector[1]) + (C * vector[2]);
   t *= -1;
 
   return t;
@@ -149,7 +158,19 @@ void VectorLength(GLfloat *A, GLfloat *B, GLfloat *result) {
   result[2] = B[2] - A[2];
 }
 
-// 정점 point와 삼각형의 충돌여부를 계산하는 함수
+inline bool SignCheck(float A, float B) {
+  return (A == B) || ((A * B) > 0);
+}
+
+bool VectorDirectionCheck(GLfloat *A, GLfloat *B) {
+  bool X = SignCheck(A[0], B[0]);
+  bool Y = SignCheck(A[1], B[1]);
+  bool Z = SignCheck(A[2], B[2]);
+
+  return X && Y && Z;
+}
+
+// 정점 point이 삼각형의 내부에 위치하는지 판단하는 함수
 bool CollisionCheck(GLfloat *point) {
   // 벡터의 길이를 저장하는 배열
   GLfloat ap[3], bp[3], cp[3];
@@ -164,17 +185,18 @@ bool CollisionCheck(GLfloat *point) {
   VectorLength(triangleVertex[1], triangleVertex[2], bc);
   VectorLength(triangleVertex[2], triangleVertex[0], ca);
 
-  // 공식에 따라 삼각형의 정점과 point간의 관계를 계산한다.
-  float chk1 = (ab[0] * ap[1]) - (ab[1] * ap[0]);
-  float chk2 = (bc[0] * bp[1]) - (bc[1] * bp[0]);
-  float chk3 = (ca[0] * cp[1]) - (ca[1] * cp[0]);
+  // 법선벡터를 저장하는 배열
+  GLfloat chk1[3], chk2[3], chk3[3];
 
-  // 계산된 수식의 부호가 모두 양수이거나 혹은 음수하면 충돌
-  if (chk1 > 0 && chk2 > 0 && chk3 > 0) return true;
-  if (chk1 < 0 && chk2 < 0 && chk3 < 0) return true;
+  // 법선벡터 계산
+  VectorCrossProduct(ab, ap, chk1);
+  VectorCrossProduct(bc, bp, chk2);
+  VectorCrossProduct(ca, cp, chk3);
 
-  // 계산된 수식의 부호가 서로 다르다면 충돌하지 않는 것
-  return false;
+  // 법선벡터 방향 확인 (방향이 같은 경우 true, 아니면 false)
+  bool dir = VectorDirectionCheck(chk1, chk2) && VectorDirectionCheck(chk2, chk3);
+
+  return dir;
 }
 
 // OpenGL 초기화 함수
@@ -215,13 +237,9 @@ void display() {
   glLoadIdentity();
 
   // 카메라 설정
-  gluLookAt(
-    (float)(cameraRadius * cos(cameraRadians)),
-    (float)(cameraRadius * sin(cameraRadians)),
-    5,
-    0, 0, 0,
-    0, 0, 1
-  );
+  gluLookAt(cameraPos[0], cameraPos[1], cameraPos[2],
+            cameraVector[0], cameraVector[1], cameraVector[2],
+            0, 0, 1);
 
   // 확대
   glScalef(cameraScale, cameraScale, cameraScale);
@@ -230,12 +248,14 @@ void display() {
   drawGrid(1, 1);
 
   // 직선 (하단부)
-  glLineWidth(3);
-  glBegin(GL_LINES);
-    glColor3f(1, 0, 0);
-    glVertex3fv(bulletMiddlePoint);
-    glVertex3fv(bulletEndPoint);
-  glEnd();
+  if (!SignCheck(cameraDistance, bulletDistance)) {
+    glLineWidth(3);
+    glBegin(GL_LINES);
+      glColor3f(1, 0, 0);
+      glVertex3fv(bulletPos);
+      glVertex3fv(bulletEndPoint);
+    glEnd(); 
+  }
 
   // 삼각형
   glBegin(GL_TRIANGLES);
@@ -253,20 +273,23 @@ void display() {
     glPopMatrix();
   glEnd();
 
-  // 직선 상단부
-  glBegin(GL_LINES);
-    glColor3f(1, 0, 0);
-    glVertex3fv(bulletPos);
-    glVertex3fv(bulletMiddlePoint);
-  glEnd();
+  // 직선 (상단부)
+  if (SignCheck(cameraDistance, bulletDistance)) {
+    glLineWidth(3);
+    glBegin(GL_LINES);
+      glColor3f(1, 0, 0);
+      glVertex3fv(bulletPos);
+      glVertex3fv(bulletEndPoint);
+    glEnd(); 
+  }
 
-  if (isCollision) {
+  if (bulletDistance >= 0) {
     // 직선과 평면의 교점
     glPointSize(5);
     glBegin(GL_POINTS);
       glColor3f(0, 0, 1);
-      glVertex3fv(bulletMiddlePoint);
-    glEnd(); 
+      glVertex3fv(bulletEndPoint);
+    glEnd();
   }
 
   // 화면 그리기
@@ -294,6 +317,8 @@ void keyboard(unsigned char key, int x, int y) {
   else if (key == 'm') cameraScale -= cameraMoveSpeed;
   // 데이터 입력
   else if (key == 'c') InputData();
+  // 직선 이동 모드 변경
+  else if (key == 'z') lineMoveMode = (lineMoveMode + 1) % 3;
   // 프로그램 종료
   else if (key == 'q') exit(0);
 
@@ -305,14 +330,21 @@ void keyboard(unsigned char key, int x, int y) {
 // 키보드 입력 함수 (특수키)
 void specialKeyboard(int key, int x, int y) {
   // 총알의 벡터 조작 (직선의 기울기를 변경)
-  if (key == GLUT_KEY_UP) bulletVector[1] += lineMoveSpeed;
-  else if (key == GLUT_KEY_DOWN) bulletVector[1] -= lineMoveSpeed;
-  else if (key == GLUT_KEY_LEFT) bulletVector[0] -= lineMoveSpeed;
-  else if (key == GLUT_KEY_RIGHT) bulletVector[0] += lineMoveSpeed;
+  if (key == GLUT_KEY_UP) bulletVector[(lineMoveMode + 1) % 3] += lineMoveSpeed;
+  else if (key == GLUT_KEY_DOWN) bulletVector[(lineMoveMode + 1) % 3] -= lineMoveSpeed;
+  else if (key == GLUT_KEY_LEFT) bulletVector[(lineMoveMode) % 3] -= lineMoveSpeed;
+  else if (key == GLUT_KEY_RIGHT) bulletVector[(lineMoveMode) % 3] += lineMoveSpeed;
 }
 
 // 업데이트 함수
 void update() {
+  // 카메라 위치 계산
+  cameraPos[0] = (float)(cameraRadius * cos(cameraRadians));
+  cameraPos[1] = (float)(cameraRadius * sin(cameraRadians));
+
+  // 카메라와 평면 그리고 직선 간의 위치 관계를 계산
+  cameraDistance = DistancePointAndPlane(triangleVertex, cameraPos, bulletVector);
+
   // 평면의 법선벡터를 계산
   GLfloat planeVectorA[3], planeVectorB[3], planeNormalVector[3];
   VectorLength(triangleVertex[0], triangleVertex[1], planeVectorA);
@@ -324,20 +356,18 @@ void update() {
 
   // 총알과 평면 사이의 거리를 계산
   // (직선과 평면이 평행한 경우 길이를 3으로 고정)
-  float distance = innerProduct == 0 ? 3 : DistancePointAndPlane();
+  bulletDistance = innerProduct == 0 ? 3 : DistancePointAndPlane(triangleVertex, bulletPos, bulletVector);
 
-  // bulletMiddlePoint: 평면과 직선이 만나는 교점
-  LineEndPoint(bulletPos, bulletVector, distance, bulletMiddlePoint);
-  // bulletEndPoint: 직선의 끝점
-  LineEndPoint(bulletPos, bulletVector, distance * 2.0f, bulletEndPoint);
+  // 평면과 직선이 만나는 교점
+  LineEndPoint(bulletPos, bulletVector, bulletDistance, bulletEndPoint);
 
   // 충돌 여부를 저장하는 변수
   isCollision = false;
 
   // 직선과 평면이 평행하거나 총알 벡터가 평면과 반대인 경우 충돌하지 않는다.
-  if (innerProduct != 0 && distance >= 0) {
+  if (innerProduct != 0 && bulletDistance >= 0) {
     // 직선과 평면의 교점 좌표가 삼각형 내부에 있는지 판단
-    isCollision = CollisionCheck(bulletMiddlePoint);
+    isCollision = CollisionCheck(bulletEndPoint);
   }
 
   // 화면을 그린다.
@@ -355,6 +385,7 @@ int main(int argc, char **argv) {
   printf("W A S D  : 카메라 이동\n");
   printf("N M      : 카메라 확대, 축소\n");
   printf("방향키   : 벡터 값 조정\n");
+  printf("Z        : 벡터 조정 좌표 변경 (xy, yz, zx)\n");
   printf("C        : 데이터 입력\n");
   printf("Q        : 프로그램 종료\n\n");
 
